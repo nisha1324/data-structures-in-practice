@@ -9,7 +9,9 @@ Source snapshot: 342,390 rows downloaded 2026-10-11T03:47:19+00:00, SHA-256 `6ae
 | Still open at download (no closed date) | 11,299 | 3.3% |
 | Closed at the same second it was created | 11,455 | 3.3% |
 | Closed *before* it was created (kept; never counts as open) | 28 | 0.01% |
-| No incident address (can't be matched to another ticket) | 22,882 | 6.7% |
+| No incident address | 22,882 | 6.7% |
+| Street name only, no house number (e.g. BROADWAY) | 29,859 | 8.7% |
+| **Can't be matched to another ticket** (any of the above, or no borough) | 52,750 | 15.4% |
 | Agency marked it a duplicate in the resolution text | 22,175 | 6.5% |
 
 Duplicate flags by agency: DOT 9,787, HPD 8,858, DEP 3,508, DCWP 11, TLC 11.

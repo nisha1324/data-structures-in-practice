@@ -1,7 +1,7 @@
 """Time the naive O(n²) repeat finder against the hash-map O(n) one.
 
-Uses the first n March 2026 tickets (in time order, address present) so the
-keys repeat the way real tickets do. Both versions must return identical
+Uses the first n March 2026 tickets (in time order, with a matchable building
+address) so the keys repeat the way real tickets do. Both versions must return identical
 answers at every size, or the script stops. The naive version stops growing
 once a single run passes NAIVE_BUDGET_S seconds; its time at full size is
 extrapolated from the largest measured run assuming time grows with n² (the
@@ -123,7 +123,7 @@ def main() -> None:
         "",
         f"- Naive run time grows as about n^{k:.2f} (fitted from 2,000 tickets up): "
         "doubling the tickets roughly quadruples the time. The hash map grows about linearly.",
-        f"- All {full:,} tickets with an address: the hash map takes **{t_full:.2f} s**. "
+        f"- All {full:,} tickets with a building address: the hash map takes **{t_full:.2f} s**. "
         f"The naive version would take about **{est_full / 3600:.1f} hours** "
         f"(extrapolated from the {int(b.n):,}-ticket run as n², not run).",
         "",

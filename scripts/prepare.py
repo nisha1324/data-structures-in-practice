@@ -2,7 +2,9 @@
 
 Keeps every row (nothing is dropped) and adds:
 - `created`, `closed`: parsed timestamps (closed is empty while a ticket is open)
-- `address_key`: normalised incident address, empty when the address is missing
+- `address_key`: normalised building address plus borough ("1 MAIN STREET, BRONX").
+  Empty when the address is missing, the borough is unspecified, or the
+  address is a street name with no house number (those can't be matched)
 - `agency_dup_flag`: True when the agency's own resolution text says the ticket
   is a duplicate. DOT, HPD and DEP write this; it's used as a reference to
   check the repeat-report rule, not as ground truth for every agency.
@@ -16,7 +18,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from dsa.repeats import normalise_address  # noqa: E402
+from dsa.repeats import has_house_number, location_key, normalise_address  # noqa: E402
 
 RAW = ROOT / "data" / "raw" / "311_2026-03.csv.gz"
 SOURCE = ROOT / "data" / "raw" / "source.json"
@@ -28,7 +30,7 @@ def prepare(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.copy()
     df["created"] = pd.to_datetime(df["created_date"])
     df["closed"] = pd.to_datetime(df["closed_date"])
-    df["address_key"] = df["incident_address"].map(normalise_address)
+    df["address_key"] = [location_key(b, a) for b, a in zip(df["borough"], df["incident_address"])]
     df["agency_dup_flag"] = df["resolution_description"].str.contains(
         "duplicate", case=False, na=False)
     df = df.drop(columns=["created_date", "closed_date"])
@@ -46,7 +48,10 @@ def main() -> None:
     open_n = int(df["closed"].isna().sum())
     neg = int((df["closed"] < df["created"]).sum())
     instant = int((df["closed"] == df["created"]).sum())
-    no_addr = int(df["address_key"].isna().sum())
+    addr = df["incident_address"].map(normalise_address)
+    no_addr = int(addr.isna().sum())
+    unmatched = int(df["address_key"].isna().sum())
+    street_only = int((addr.notna() & ~addr.fillna("").map(has_house_number)).sum())
     flags = (df[df["agency_dup_flag"]].groupby("agency").size()
              .sort_values(ascending=False))
     lines = [
@@ -62,7 +67,9 @@ def main() -> None:
         f"| Still open at download (no closed date) | {open_n:,} | {open_n / n:.1%} |",
         f"| Closed at the same second it was created | {instant:,} | {instant / n:.1%} |",
         f"| Closed *before* it was created (kept; never counts as open) | {neg:,} | {neg / n:.2%} |",
-        f"| No incident address (can't be matched to another ticket) | {no_addr:,} | {no_addr / n:.1%} |",
+        f"| No incident address | {no_addr:,} | {no_addr / n:.1%} |",
+        f"| Street name only, no house number (e.g. BROADWAY) | {street_only:,} | {street_only / n:.1%} |",
+        f"| **Can't be matched to another ticket** (any of the above, or no borough) | {unmatched:,} | {unmatched / n:.1%} |",
         f"| Agency marked it a duplicate in the resolution text | {int(df['agency_dup_flag'].sum()):,} | {df['agency_dup_flag'].mean():.1%} |",
         "",
         "Duplicate flags by agency: "

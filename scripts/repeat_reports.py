@@ -10,8 +10,8 @@ and `results/charts/01_repeat_share_by_type.png`.
 2. **Size the problem everywhere,** including agencies that don't flag
    duplicates at all (NYPD is 41% of all tickets).
 
-Match key: agency + complaint type + normalised address. Tickets without an
-address are never matched. Only tickets created in March are in the data, so
+Match key: agency + complaint type + building address + borough. Tickets with
+no address, no borough, or only a street name ("BROADWAY") are never matched. Only tickets created in March are in the data, so
 an issue first reported in late February isn't seen and early-March repeats
 are slightly undercounted.
 """
@@ -137,7 +137,7 @@ def chart(top: pd.DataFrame, path: Path) -> None:
     handles = [plt.Rectangle((0, 0), 1, 1, color=ORANGE), plt.Rectangle((0, 0), 1, 1, color=BLUE)]
     ax.legend(handles, ["agency marks duplicates for this type", "no duplicate marking for this type"],
               loc="lower right", frameon=False, fontsize=8.5, labelcolor=INK_2)
-    fig.text(0.01, 0.01, "* address missing on most tickets, so repeats can't be matched",
+    fig.text(0.01, 0.01, "* most tickets have no building address (missing, or a street name only), so repeats can't be matched",
              fontsize=7.5, color=INK_2)
     fig.tight_layout()
     fig.savefig(path, dpi=150, facecolor=SURFACE)
@@ -173,7 +173,8 @@ def main() -> None:
         "# Repeat reports in NYC 311, March 2026",
         "",
         "Rule: a ticket is a **repeat** when an earlier ticket with the same agency, "
-        "complaint type and normalised address was still open when it came in. "
+        "complaint type and building address (house number, street, borough) was still open when it came in. "
+        "Street-name-only addresses are never matched. "
         "The 24-hour variant (earlier ticket within 24 hours, open or not) is shown for comparison.",
         "",
         f"- Tickets: {n:,}; repeats: **{reps:,} ({pct(reps / n)})**; "

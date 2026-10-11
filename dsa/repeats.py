@@ -25,6 +25,10 @@ from collections.abc import Sequence
 Ticket = tuple[object, int, "int | None"]
 
 _SPACES = re.compile(r"\s+")
+# "<number> <street type>" alone is a numbered street ("1 AVENUE", "8 STREET"), not a building
+_NUMBERED_STREET = re.compile(
+    r"^\d+ (AVENUE|AVE|STREET|ST|ROAD|RD|PLACE|PL|DRIVE|DR|LANE|LN|BOULEVARD|BLVD|TERRACE|COURT|CT)$")
+_BOROUGHS = {"BRONX", "BROOKLYN", "MANHATTAN", "QUEENS", "STATEN ISLAND"}
 
 
 def normalise_address(address: object) -> str | None:
@@ -33,6 +37,31 @@ def normalise_address(address: object) -> str | None:
         return None
     cleaned = _SPACES.sub(" ", address).strip().upper()
     return cleaned or None
+
+
+def has_house_number(address: str) -> bool:
+    """True for a building address ("1869 83 STREET", "4640 BROADWAY").
+
+    False for a street name alone ("BROADWAY", "WEST 4 STREET", "1 AVENUE"):
+    311 records many street and traffic problems that way, and a street name
+    covers miles of road, so two tickets on it aren't the same place.
+    """
+    return (address[:1].isdigit() and " " in address
+            and not _NUMBERED_STREET.match(address))
+
+
+def location_key(borough: object, address: object) -> str | None:
+    """Match key for a place: ``"<address>, <BOROUGH>"``, or None if it can't be matched.
+
+    The same address can exist in several boroughs, so the borough is part of
+    the key. Missing or unspecified boroughs, missing addresses and street-only
+    addresses give None.
+    """
+    addr = normalise_address(address)
+    boro = normalise_address(borough)
+    if addr is None or boro not in _BOROUGHS or not has_house_number(addr):
+        return None
+    return f"{addr}, {boro}"
 
 
 def _check_rule(rule: str, window_s: int | None) -> None:

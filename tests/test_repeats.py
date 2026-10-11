@@ -2,7 +2,8 @@ import random
 
 import pytest
 
-from dsa.repeats import find_repeats_indexed, find_repeats_naive, normalise_address
+from dsa.repeats import (find_repeats_indexed, find_repeats_naive, has_house_number,
+                         location_key, normalise_address)
 
 H = 3600
 
@@ -13,6 +14,33 @@ def test_normalise_address():
     assert normalise_address("   ") is None
     assert normalise_address(None) is None
     assert normalise_address(float("nan")) is None
+
+
+@pytest.mark.parametrize("address,expected", [
+    ("1869 83 STREET", True),
+    ("4640 BROADWAY", True),
+    ("78-15 PARSONS BOULEVARD", True),
+    ("1040B EAST 217 STREET", True),
+    ("1 AVENUE J", True),           # house 1 on Avenue J
+    ("BROADWAY", False),            # street name only
+    ("WEST 4 STREET", False),
+    ("1 AVENUE", False),            # First Avenue, not a building
+    ("141 AVENUE", False),
+    ("8 STREET", False),
+    ("123", False),
+])
+def test_has_house_number(address, expected):
+    assert has_house_number(address) is expected
+
+
+def test_location_key():
+    assert location_key("BROOKLYN", " 1869  83 street") == "1869 83 STREET, BROOKLYN"
+    # same address in two boroughs is two places
+    assert location_key("QUEENS", "1869 83 STREET") != location_key("BROOKLYN", "1869 83 STREET")
+    assert location_key("Unspecified", "1869 83 STREET") is None
+    assert location_key(None, "1869 83 STREET") is None
+    assert location_key("MANHATTAN", "BROADWAY") is None
+    assert location_key("MANHATTAN", None) is None
 
 
 @pytest.mark.parametrize("find", [find_repeats_naive, find_repeats_indexed])
