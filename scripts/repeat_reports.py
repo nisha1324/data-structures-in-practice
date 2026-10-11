@@ -77,6 +77,7 @@ def validation(df: pd.DataFrame) -> pd.DataFrame:
             row[f"{prefix}_flagged"] = int(pred.sum())
             row[f"{prefix}_recall"] = tp / row["agency_flags"]
             row[f"{prefix}_precision"] = tp / max(int(pred.sum()), 1)
+            row[f"{prefix}_recall_addr"] = tp / max(row["flags_with_address"], 1)
         rows.append(row)
     return pd.DataFrame(rows).sort_values("tickets", ascending=False)
 
@@ -187,14 +188,15 @@ def main() -> None:
         f"{all_flags:,} agency flags. *Recall* = share of the agency's flags the rule also finds; "
         "*precision* = share of the rule's repeats the agency also flagged.",
         "",
-        "| Agency | Complaint type | Tickets | Agency flags | …with an address | Rule: open → repeats | Recall | Precision | Rule: 24h → repeats | Recall | Precision |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Agency | Complaint type | Tickets | Agency flags | …with an address | Rule: open → repeats | Recall | Recall (flags with an address) | Precision | Rule: 24h → repeats | Recall | Precision |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in val.itertuples():
         lines.append(
             f"| {r.agency} | {r.complaint_type} | {r.tickets:,} | {r.agency_flags:,} | "
             f"{r.flags_with_address:,} | "
-            f"{r.open_flagged:,} | {pct(r.open_recall)} | {pct(r.open_precision)} | "
+            f"{r.open_flagged:,} | {pct(r.open_recall)} | {pct(r.open_recall_addr)} | "
+            f"{pct(r.open_precision)} | "
             f"{r.win_flagged:,} | {pct(r.win_recall)} | {pct(r.win_precision)} |")
     lines += [
         "",
