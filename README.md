@@ -1,6 +1,6 @@
 # Data structures in practice: NYC 311 service requests
 
-> **Status: in progress.** Part 1 (hash maps for finding repeat reports) is built, tested and run on a full month of data. Heaps, a sweep line and union-find come next (see [Roadmap](#roadmap)).
+> **Status: in progress.** Part 1 (hash maps for finding repeat reports) and the analysis half of Part 2 (heaps for ranking repeat hot spots) are built, tested and run on a full month of data. The Part 2 benchmark, a sweep line and union-find come next (see [Roadmap](#roadmap)).
 
 **Business question:** a city's 311 line logged **342,390 service requests in March 2026**. Agencies plan crews, inspectors and budgets from ticket counts. But how many tickets are *new problems*, and how many are people reporting a problem that's already on the list? And can an analyst answer that on a laptop in seconds instead of hours?
 
@@ -55,6 +55,36 @@ Precision is lower (HPD heat: 50.0% of the rule's repeats carry HPD's flag) beca
 2. **Link repeats at intake.** The hash-map check is cheap enough to run on every new ticket: attach it to the open ticket and tell the caller it's already logged. That's how HPD handles 8,126 heat tickets already; the same check would cover its unsanitary and paint/plaster complaints and NYPD's noise calls.
 3. **Treat repeat counts as a signal, not noise.** An address that keeps generating repeats is a persistent problem (no heat, a noisy venue). Part 2 ranks those hot spots.
 
+## Part 2: repeat hot spots with heaps (top-k)
+
+Part 1 counted repeats. The next question is *where* they come from: if a few addresses produce most of the repeat calls, an agency can deal with those places once instead of answering every call.
+
+### The data structure
+Repeats are counted per agency and building with a `dict` (Part 1's tool again). Picking the top addresses from those counts is a **top-k** problem:
+
+| Version | How it works | Cost |
+|---|---|---|
+| Sort (`top_k_sort`) | Sort every address by repeat count, keep the first k | O(n log n) time, holds all n |
+| Bounded heap (`top_k_heap`) | Keep a min-heap of the best k so far. Its root is the weakest of them, so a new address only gets in if it beats the root | O(n log k) time, holds only k |
+| Heap per group (`top_k_per_group`) | One heap per agency in a dict, filled in a single pass | O(n log k) time, holds agencies × k |
+
+Ties go to the address whose first repeat came earlier, so the heap returns exactly the list that sorting returns. The tests check this against `sorted()` and the standard library's `heapq.nlargest` on random data full of ties. A timing and memory benchmark against both is the next step.
+
+### Findings
+From [`results/hot_spots.md`](results/hot_spots.md). House numbers are left out of every output in this repo: the 311 data is public, but the business point doesn't need to identify single homes.
+
+![Hot-spot concentration](results/charts/03_hot_spot_concentration.png)
+
+- **NYPD's repeat calls come from a small number of places.** 1% of the addresses with an NYPD ticket (585 of 58,420) produced **56.4%** of its repeats (8,483 of 15,041). One Bronx building alone produced 1,526 repeats, **10.1% of all NYPD repeats**, from 1,596 noise tickets (almost all "loud music/party") on 9 days in March.
+- **Every other large agency is concentrated too.** The top 1% of addresses produced 39–48% of repeats at DOT, DOB, DSNY, DEP, DOHMH and DPR. HPD is the most spread out: its top 1% (151 buildings) produced 26.3% of its 33,003 repeats, so its repeat work comes from many buildings. Its top building had 461 repeats from 471 heat tickets over 22 days.
+- **Some buildings are a problem for several agencies at once.** 113 buildings had repeat tickets for 3 or more agencies. The second-largest is one Bronx building on Woodycrest Avenue with 315 repeats across 5 agencies: HPD 216, DSNY 60, DOB 24, DOHMH 11 and NYPD 4. The most common complaint there for each agency tells one story: garbage storage (HPD), trash (DSNY), boilers (DOB), rats (DOHMH). Each agency sees only its own part.
+- **Repeats undercount chronic places.** One Brooklyn address had 746 residential noise tickets (almost all "banging/pounding"), with at least one every day of March, but only 325 count as repeats: the other 421 arrived when no earlier ticket there was still open. "Still open" measures duplicate work; "days with a ticket" measures a chronic problem. Both columns are in the report.
+
+**What this means for the business:**
+1. **Manage the top 1% as cases, not tickets.** For NYPD, 585 addresses drive more than half of repeat calls. One owner and one plan per chronic location (a single coordinated visit, a call to the building's management) can replace dozens of separate responses to the same place.
+2. **Share a cross-agency hot-spot list.** A building that shows up as garbage, boiler and rat complaints in four different queues is probably one management problem. The 113 multi-agency buildings are a short list for a joint inspection.
+3. **Track chronic locations by days with a ticket, as well as by repeats.** An address that's reported every day but closed every time never looks like a duplicate.
+
 ## Data
 [NYC Open Data: 311 Service Requests from 2010 to Present](https://data.cityofnewyork.us/d/erm2-nwe9), published by the City of New York. Use is governed by the [NYC Open Data Terms of Use](https://opendata.cityofnewyork.us/overview/#termsofuse). `scripts/download_data.py` fetches every request **created in March 2026** (13 columns, 342,390 rows, ~20 MB gzipped) from the keyless Socrata API, in a fixed order, and checks the server's row count.
 
@@ -66,6 +96,7 @@ Data-quality checks are in [`results/prep_log.md`](results/prep_log.md): `unique
 - **Exact building-address match only.** "1 MAIN ST" and "1 MAIN STREET" don't match, nearby addresses (water-main breaks) don't link, and street-name-only tickets (most of DOT's) aren't checked at all. Part 4 adds location-based matching.
 - **One month.** Issues first reported in late February aren't in the data, so repeats in early March are slightly undercounted.
 - **The agency flag is a reference, not ground truth.** Agencies use it for some complaint types only, and their rules aren't published.
+- **Tickets, not people.** The data has no caller ID, so one persistent caller and many neighbours look the same. A hot spot is a place that generates work, not proof of a widespread problem.
 - **Descriptor isn't in the key.** Two different heat problems at one address (apartment vs whole building) count as one issue.
 
 ## How to run
@@ -76,22 +107,25 @@ python scripts/download_data.py              # ~20 MB → data/raw/ (+ source.js
 python scripts/prepare.py                    # → data/processed/tickets.parquet + results/prep_log.md
 python scripts/repeat_reports.py             # → results/repeat_reports.md, .csv, chart 01
 python scripts/benchmark.py                  # ~2 min → results/benchmarks.md, .csv, chart 02
-pytest                                       # 11 offline tests
+python scripts/hot_spots.py                  # → results/hot_spots.md, .csv, chart 03
+pytest                                       # 41 offline tests
 ```
 
 ## Repo layout
 ```
-dsa/repeats.py              naive and hash-map repeat finders (pure Python, no pandas)
+dsa/repeats.py              naive and hash-map repeat finders, building-address key (pure Python)
+dsa/topk.py                 sort vs bounded-heap top-k, overall and per group (pure Python)
 scripts/download_data.py    fetch March 2026 from the NYC Open Data API
 scripts/prepare.py          parse, normalise addresses, data-quality log
 scripts/repeat_reports.py   Part 1 analysis
 scripts/benchmark.py        naive vs hash map timings
+scripts/hot_spots.py        Part 2 analysis
 tests/                      unit tests (hand-made cases + naive == indexed on random data)
 results/                    generated reports, CSVs and charts
 ```
 
 ## Roadmap
-- **Part 2: heaps for top-k.** The addresses generating the most repeats per agency, computed in one streaming pass with `heapq` (O(n log k)) vs sorting everything.
+- **Part 2: heaps for top-k.** ~~Hot spots per agency~~ (done). Next: benchmark the heap against sorting and `heapq.nlargest`, for both time and memory, at several sizes of n and k.
 - **Part 3: a sweep line for backlog.** Peak number of open tickets per agency over the month (the staffing question), from sorted open/close events vs checking every hour against every ticket.
 - **Part 4: union-find and spatial hashing.** Group reports of one incident from nearby addresses (water-main breaks, potholes on one block) and re-check DEP's water-system flags.
 - Then: final recommendations, limitations, and the finished write-up.
