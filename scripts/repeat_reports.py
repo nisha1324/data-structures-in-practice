@@ -69,7 +69,8 @@ def validation(df: pd.DataFrame) -> pd.DataFrame:
     for agency, ctype in scope:
         s = df[(df["agency"] == agency) & (df["complaint_type"] == ctype)]
         row = {"agency": agency, "complaint_type": ctype, "tickets": len(s),
-               "agency_flags": int(s["agency_dup_flag"].sum())}
+               "agency_flags": int(s["agency_dup_flag"].sum()),
+               "flags_with_address": int((s["agency_dup_flag"] & s["address_key"].notna()).sum())}
         for rule, prefix in (("open", "open"), ("24h", "win")):
             pred = s[f"repeat_{rule}"]
             tp = int((pred & s["agency_dup_flag"]).sum())
@@ -92,6 +93,20 @@ def by_type(df: pd.DataFrame) -> pd.DataFrame:
     t["distinct_issues"] = t["tickets"] - t["repeats"]
     t["agency_flags_dups"] = t["agency_flags"] > 0
     return t.sort_values("tickets", ascending=False).reset_index(drop=True)
+
+
+def unflagged_section(df: pd.DataFrame, agency: str = "HPD",
+                      ctype: str = "HEAT/HOT WATER", top: int = 5) -> list[str]:
+    """How the agency closed the repeats it didn't mark as duplicates."""
+    s = df[(df["agency"] == agency) & (df["complaint_type"] == ctype)
+           & df["repeat_open"] & ~df["agency_dup_flag"]]
+    counts = (s["resolution_description"].fillna("(no resolution text)")
+              .str.slice(0, 90).value_counts().head(top))
+    out = [f"### {agency} {ctype}: repeats the agency didn't mark as duplicates", "",
+           f"{len(s):,} tickets. Most common resolution texts (first 90 characters):", "",
+           "| Tickets | Resolution text starts with |", "|---:|---|"]
+    out += [f"| {c:,} | {t.strip()}… |" for t, c in counts.items()]
+    return out + [""]
 
 
 def chart(top: pd.DataFrame, path: Path) -> None:
@@ -172,19 +187,22 @@ def main() -> None:
         f"{all_flags:,} agency flags. *Recall* = share of the agency's flags the rule also finds; "
         "*precision* = share of the rule's repeats the agency also flagged.",
         "",
-        "| Agency | Complaint type | Tickets | Agency flags | Rule: open → repeats | Recall | Precision | Rule: 24h → repeats | Recall | Precision |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Agency | Complaint type | Tickets | Agency flags | …with an address | Rule: open → repeats | Recall | Precision | Rule: 24h → repeats | Recall | Precision |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in val.itertuples():
         lines.append(
             f"| {r.agency} | {r.complaint_type} | {r.tickets:,} | {r.agency_flags:,} | "
+            f"{r.flags_with_address:,} | "
             f"{r.open_flagged:,} | {pct(r.open_recall)} | {pct(r.open_precision)} | "
             f"{r.win_flagged:,} | {pct(r.win_recall)} | {pct(r.win_precision)} |")
     lines += [
         "",
         f"Across these types the open rule finds {val_tp:,} of the {val_flags:,} agency flags "
-        f"({pct(val_tp / val_flags)}).",
+        f"({pct(val_tp / val_flags)}). Flags on tickets with no address can't be found by "
+        "an address-based rule.",
         "",
+        *unflagged_section(df),
         "## 2. Repeat share by agency",
         "",
         "| Agency | Tickets | Repeats (open rule) | Share | Agency duplicate flags |",

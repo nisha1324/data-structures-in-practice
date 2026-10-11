@@ -9,16 +9,28 @@ Rule: a ticket is a **repeat** when an earlier ticket with the same agency, comp
 
 Complaint types where the agency marked at least 5% of tickets (and 100+ tickets) as duplicates. They cover 22,056 of the 22,175 agency flags. *Recall* = share of the agency's flags the rule also finds; *precision* = share of the rule's repeats the agency also flagged.
 
-| Agency | Complaint type | Tickets | Agency flags | Rule: open → repeats | Recall | Precision | Rule: 24h → repeats | Recall | Precision |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| HPD | HEAT/HOT WATER | 29,783 | 8,126 | 15,851 | 97.5% | 50.0% | 12,942 | 89.5% | 56.2% |
-| DOT | Street Condition | 28,629 | 9,787 | 12,314 | 56.8% | 45.1% | 7,892 | 38.9% | 48.2% |
-| HPD | PLUMBING | 6,927 | 363 | 3,089 | 95.0% | 11.2% | 2,294 | 85.7% | 13.6% |
-| DEP | Noise | 5,990 | 1,176 | 1,224 | 41.1% | 39.5% | 912 | 31.4% | 40.5% |
-| DEP | Water System | 5,463 | 2,247 | 597 | 22.8% | 85.8% | 505 | 19.3% | 85.9% |
-| HPD | GENERAL | 3,469 | 357 | 1,269 | 85.4% | 24.0% | 770 | 53.5% | 24.8% |
+| Agency | Complaint type | Tickets | Agency flags | …with an address | Rule: open → repeats | Recall | Precision | Rule: 24h → repeats | Recall | Precision |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| HPD | HEAT/HOT WATER | 29,783 | 8,126 | 8,126 | 15,851 | 97.5% | 50.0% | 12,942 | 89.5% | 56.2% |
+| DOT | Street Condition | 28,629 | 9,787 | 6,051 | 12,314 | 56.8% | 45.1% | 7,892 | 38.9% | 48.2% |
+| HPD | PLUMBING | 6,927 | 363 | 363 | 3,089 | 95.0% | 11.2% | 2,294 | 85.7% | 13.6% |
+| DEP | Noise | 5,990 | 1,176 | 1,044 | 1,224 | 41.1% | 39.5% | 912 | 31.4% | 40.5% |
+| DEP | Water System | 5,463 | 2,247 | 1,714 | 597 | 22.8% | 85.8% | 505 | 19.3% | 85.9% |
+| HPD | GENERAL | 3,469 | 357 | 357 | 1,269 | 85.4% | 24.0% | 770 | 53.5% | 24.8% |
 
-Across these types the open rule finds 15,125 of the 22,056 agency flags (68.6%).
+Across these types the open rule finds 15,125 of the 22,056 agency flags (68.6%). Flags on tickets with no address can't be found by an address-based rule.
+
+### HPD HEAT/HOT WATER: repeats the agency didn't mark as duplicates
+
+7,930 tickets. Most common resolution texts (first 90 characters):
+
+| Tickets | Resolution text starts with |
+|---:|---|
+| 3,040 | The Department of Housing Preservation and Development conducted or attempted to conduct a… |
+| 1,381 | The Department of Housing Preservation and Development contacted a tenant in the building… |
+| 1,035 | HPD responded to a complaint of no heat or hot water in the building. An occupant of the b… |
+| 862 | HPD called the telephone number on file for this complaint.  Someone at that number indica… |
+| 799 | The following complaint conditions are still open. HPD has already attempted to notify the… |
 
 ## 2. Repeat share by agency
 
