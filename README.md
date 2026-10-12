@@ -1,6 +1,6 @@
 # Data structures in practice: NYC 311 service requests
 
-> **Status: in progress.** Part 1 (hash maps for finding repeat reports) and the analysis half of Part 2 (heaps for ranking repeat hot spots) are built, tested and run on a full month of data. The Part 2 benchmark, a sweep line and union-find come next (see [Roadmap](#roadmap)).
+> **Status: in progress.** Part 1 (hash maps for finding repeat reports) and Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark) are built, tested and run on a full month of data. A sweep line and union-find come next (see [Roadmap](#roadmap)).
 
 **Business question:** a city's 311 line logged **342,390 service requests in March 2026**. Agencies plan crews, inspectors and budgets from ticket counts. But how many tickets are *new problems*, and how many are people reporting a problem that's already on the list? And can an analyst answer that on a laptop in seconds instead of hours?
 
@@ -68,7 +68,29 @@ Repeats are counted per agency and building with a `dict` (Part 1's tool again).
 | Bounded heap (`top_k_heap`) | Keep a min-heap of the best k so far. Its root is the weakest of them, so a new address only gets in if it beats the root | O(n log k) time, holds only k |
 | Heap per group (`top_k_per_group`) | One heap per agency in a dict, filled in a single pass | O(n log k) time, holds agencies × k |
 
-Ties go to the address whose first repeat came earlier, so the heap returns exactly the list that sorting returns. The tests check this against `sorted()` and the standard library's `heapq.nlargest` on random data full of ties. A timing and memory benchmark against both is the next step.
+Ties go to the address whose first repeat came earlier, so the heap returns exactly the list that sorting returns. The tests check this against `sorted()` and the standard library's `heapq.nlargest` on random data full of ties.
+
+### Benchmark: is the heap actually faster?
+From [`results/benchmarks_topk.md`](results/benchmarks_topk.md). Three versions, which returned identical lists in every test: sorting everything (`sorted()`, written in C), the hand-written heap above (a Python loop), and `heapq.nlargest` (the same heap algorithm, with its loop in C). Time is measured on lists already in memory; peak memory is measured with `tracemalloc` while each version reads a **stream** of items made one at a time.
+
+![Top-k benchmark: time vs k, time vs n, memory vs n](results/charts/04_benchmark_topk.png)
+
+| Test | Sort | Hand-written heap | `heapq.nlargest` |
+|---|---:|---:|---:|
+| Top 10 of 135,720 real agency-address counts | 16.3 ms | 16.6 ms | **6.4 ms** |
+| Top 10,000 of the same | **16.4 ms** | 52.4 ms | 30.6 ms |
+| Top 10 of 1,000,000 synthetic items | 166.7 ms | 128.1 ms | **55.2 ms** |
+| Peak memory, top 10 of a 1,000,000-item stream | 108.25 MB | **5.9 kB** | 6.6 kB |
+| Top 10 per agency, 135,720 rows (16 agencies) | 61.9 ms (sort each agency) | 36.7 ms (heap per agency) | 29.0 ms (pandas, from a DataFrame) |
+
+- **The textbook speed-up mostly doesn't show up in Python.** O(n log k) beats O(n log n) on paper, but the hand-written heap only matches the C sort on the real counts at small k, and is about 1.3× faster at a million items. The heap's loop runs in Python, and `sorted()` runs in C.
+- **The same algorithm in C wins.** `heapq.nlargest` was 2.5× faster than sorting for the top 10 of the real counts, and 3× faster at a million items.
+- **For large k, just sort.** Both heaps slow down as k grows: from k = 1,000 (about 0.7% of the items) the hand-written heap is slower than sorting, and at k = 10,000 so is `nlargest`. (At k = all, `nlargest` notices and calls `sorted()` itself.)
+- **Memory is where the heap really wins.** Sorting a stream means holding all of it: 108 MB for a million items, growing in step with n. Both heaps held 6–7 kB at every size from 10,000 to 1,000,000 items. A top-k over a feed or a file too big for memory works with a heap and doesn't work with a sort.
+- **Grouped top-k:** one heap per agency was 1.7× faster than sorting each agency's list. If the data is already in a pandas DataFrame, `sort_values().groupby().head()` was quicker still (29 ms, not counting building the DataFrame).
+- An honest note on the baseline: the first draft sorted with a Python `lambda` key, which made sorting about 40% slower (21.8 vs 15.3 ms on the real counts) and flattered the heap. The baseline now uses `operator.itemgetter` (C), so this compares the heap with the fastest plain sort.
+
+**What this means for the business:** for a ranking on data that fits in memory (most daily analyst work), use the library call: `heapq.nlargest`, pandas `nlargest`, or a sort. Writing the algorithm by hand didn't make anything faster. The reason to know the heap is memory. A "top 100 addresses" job that sorts its input needs memory in step with the data (about 108 bytes per item in this test) and will eventually fail on a big enough month or a live feed. The same job with a heap needs a fixed few kilobytes however much data flows through, so it can run on a small machine or inside a streaming pipeline.
 
 ### Findings
 From [`results/hot_spots.md`](results/hot_spots.md). House numbers are left out of every output in this repo: the 311 data is public, but the business point doesn't need to identify single homes.
@@ -108,6 +130,7 @@ python scripts/prepare.py                    # → data/processed/tickets.parque
 python scripts/repeat_reports.py             # → results/repeat_reports.md, .csv, chart 01
 python scripts/benchmark.py                  # ~2 min → results/benchmarks.md, .csv, chart 02
 python scripts/hot_spots.py                  # → results/hot_spots.md, .csv, chart 03
+python scripts/benchmark_topk.py             # ~40 s → results/benchmarks_topk.md, .csv, chart 04
 pytest                                       # 41 offline tests
 ```
 
@@ -120,12 +143,13 @@ scripts/prepare.py          parse, normalise addresses, data-quality log
 scripts/repeat_reports.py   Part 1 analysis
 scripts/benchmark.py        naive vs hash map timings
 scripts/hot_spots.py        Part 2 analysis
+scripts/benchmark_topk.py   sort vs heap vs heapq.nlargest: time and peak memory
 tests/                      unit tests (hand-made cases + naive == indexed on random data)
 results/                    generated reports, CSVs and charts
 ```
 
 ## Roadmap
-- **Part 2: heaps for top-k.** ~~Hot spots per agency~~ (done). Next: benchmark the heap against sorting and `heapq.nlargest`, for both time and memory, at several sizes of n and k.
+- ~~**Part 2: heaps for top-k.**~~ Done: hot spots per agency, plus a time and memory benchmark against sorting and `heapq.nlargest`.
 - **Part 3: a sweep line for backlog.** Peak number of open tickets per agency over the month (the staffing question), from sorted open/close events vs checking every hour against every ticket.
 - **Part 4: union-find and spatial hashing.** Group reports of one incident from nearby addresses (water-main breaks, potholes on one block) and re-check DEP's water-system flags.
 - Then: final recommendations, limitations, and the finished write-up.
