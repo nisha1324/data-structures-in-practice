@@ -1,6 +1,6 @@
 # Data structures in practice: NYC 311 service requests
 
-> **Status: in progress.** Part 1 (hash maps for finding repeat reports) and Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark) are built, tested and run on a full month of data. A sweep line and union-find come next (see [Roadmap](#roadmap)).
+> **Status: in progress.** Part 1 (hash maps for finding repeat reports), Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark) and the analysis for Part 3 (a sweep line for the open backlog) are built, tested and run on a full month of data. A Part 3 benchmark and union-find come next (see [Roadmap](#roadmap)).
 
 **Business question:** a city's 311 line logged **342,390 service requests in March 2026**. Agencies plan crews, inspectors and budgets from ticket counts. But how many tickets are *new problems*, and how many are people reporting a problem that's already on the list? And can an analyst answer that on a laptop in seconds instead of hours?
 
@@ -107,6 +107,45 @@ From [`results/hot_spots.md`](results/hot_spots.md). House numbers are left out 
 2. **Share a cross-agency hot-spot list.** A building that shows up as garbage, boiler and rat complaints in four different queues is probably one management problem. The 113 multi-agency buildings are a short list for a joint inspection.
 3. **Track chronic locations by days with a ticket, as well as by repeats.** An address that's reported every day but closed every time never looks like a duplicate.
 
+## Part 3: the open backlog with a sweep line
+
+Staffing depends on how many tickets are **open at the same time**, not on how many come in per day. A ticket counts as open from the moment it's created until the moment it's closed. The question is how long that queue gets, and when.
+
+### The data structure
+| Version | How it works | Cost |
+|---|---|---|
+| Naive (`backlog_naive`) | For each moment you ask about, check every ticket | O(n × T): an hourly view of a month is 744 passes over all tickets, and it can't see between the hours |
+| Sorted lists + binary search (`backlog_bisect`) | Sort created times and closed times once. Open at t = (created at or before t) − (closed at or before t): two `bisect` lookups | O(n log n) once, then O(log n) per moment |
+| Sweep line (`backlog_sweep`) | Sort every open (+1) and close (−1) event and walk them once with a running count | O(n log n), and it returns every moment the count changes, so the true peak can't fall between snapshots |
+
+All three return the same counts on random data in the tests, including tickets that close in the same second another opens, and tickets "closed" before they were created (never open; counting their close but not their open would make the queue negative). On the real data, the analysis script checks that the hourly counts from `bisect` match the sweep at every hour of March. A timing benchmark is next (see [Roadmap](#roadmap)).
+
+### First check: can one month of tickets show the backlog at all?
+The data holds tickets **created** in March. A ticket created in February and still open in March isn't in it. Every ticket's real time open is known (closing dates run up to the October download), so Little's law (backlog = arrivals × average time open) gives the share of a steady backlog that a one-month window can see. From [`results/backlog.md`](results/backlog.md):
+
+![Share of the open backlog a month of tickets can see](results/charts/06_backlog_visibility.png)
+
+- **NYPD is the only large agency where one month shows the whole queue.** Its tickets close fast (median 1.4 hours; 0.0% are still open after 7 days), so from the second week on nothing old is missing.
+- **For the other seven, a month of new tickets shows about half of the open backlog or less**: HPD 45.3%, DOT 44.0%, DOB 49.1%, Parks (DPR) 23.0%. These are upper bounds, because the 4.9% of HPD tickets still open at download only count as open until then. HPD had 26,920 March tickets still open at the end of March. If every month brought tickets like March, its full queue would be about 59,544, and the other ~55% would be tickets more than a month old.
+- **The long tail is the backlog.** HPD's median ticket is open 105 hours (4.4 days), but the mean is 24.8 days, and 44.0% of its tickets are still open a week after they come in. The few slow tickets make up most of what's open at any moment.
+
+So the peak-backlog analysis below is for NYPD only. For the others the honest answer is that it needs an open-ticket snapshot (all tickets with status "open", whatever month they were created), not a month of new ones.
+
+### NYPD: when is the queue longest?
+![NYPD new tickets vs open queue by hour of the week](results/charts/05_nypd_open_queue.png)
+
+- **The exact peak was 1,251 open tickets at 00:33 on Monday 9 March** (Sunday night), found by the sweep line. The highest top-of-the-hour snapshot was 1,173 at 01:00: 78 tickets (6.2%) lower. A dashboard refreshed on the hour would have under-reported the worst moment of the month. At the peak, the queue was mostly residential noise (388), illegal parking (335) and street noise (192).
+- **The queue peaks about two hours after the calls do.** Averaged over all days, new tickets peak at 22:00 (305 an hour) and the open queue at 00:00 (613 open). It's shortest at 06:00 (306). Tickets stay open 2.5 hours on average, so the queue keeps building after the calls slow down.
+- **Over the week, the queue is 4.1× longer at its worst than at its quietest**: 850 open on average from midnight to 01:00 on Monday morning (Sunday night), 208 at 05:00 on Thursday. One night pulls that 850 up: the four Monday-midnight values were 662, 1,220, 823 and 695.
+- **Sunday and Monday nights are slower to close, in every week.** Saturday night has the most calls (1,160 tickets from 21:00 to midnight on average), and they close faster than Sunday's: mean 2.51 hours, median 1.00. Sunday night has 13% fewer calls (1,008) but tickets stay open 32% longer on average (3.32 hours; median 1.74). Monday nights are similar (3.19 hours; median 1.93). Tuesday to Friday nights average 2.06–2.37 hours. Week by week, every Sunday and Monday night (2.91–4.12 hours) was slower than every Tuesday-to-Saturday night (1.73–2.83). The data shows *that* these nights are slower, not *why*: it has no staffing or priority information.
+- **Cross-check:** the sweep's average open queue over the four full weeks (465) matches Little's law, 186.7 new tickets an hour × 2.50 hours open = 466.
+
+**What this means for the business:**
+1. **Plan night cover from the open queue, not the call curve.** Calls peak at 22:00, but the work still waiting peaks at midnight, with twice as many open tickets as at 06:00. A shift that ends when calls drop leaves the busiest hour of the queue to the next team.
+2. **Look at Sunday and Monday nights first.** They get fewer calls than Saturday, but their tickets stay open 27–32% longer on average, in every week of March. That's where a coverage gap is most likely, and it's cheap to check against the rota.
+3. **Measure peaks from events, not snapshots.** The hourly snapshot missed 6% of the month's worst moment. The sweep line gives the exact peak from the same data with one sort.
+4. **Don't build backlog reports from a month of new tickets.** For HPD, DOT, DOB and the others, most of the open queue is tickets over a month old. Backlog and ageing reports need an open-ticket snapshot, and the long tail of slow tickets deserves its own report, because that tail *is* the backlog.
+
 ## Data
 [NYC Open Data: 311 Service Requests from 2010 to Present](https://data.cityofnewyork.us/d/erm2-nwe9), published by the City of New York. Use is governed by the [NYC Open Data Terms of Use](https://opendata.cityofnewyork.us/overview/#termsofuse). `scripts/download_data.py` fetches every request **created in March 2026** (13 columns, 342,390 rows, ~20 MB gzipped) from the keyless Socrata API, in a fixed order, and checks the server's row count.
 
@@ -120,6 +159,8 @@ Data-quality checks are in [`results/prep_log.md`](results/prep_log.md): `unique
 - **The agency flag is a reference, not ground truth.** Agencies use it for some complaint types only, and their rules aren't published.
 - **Tickets, not people.** The data has no caller ID, so one persistent caller and many neighbours look the same. A hot spot is a place that generates work, not proof of a widespread problem.
 - **Descriptor isn't in the key.** Two different heat problems at one address (apartment vs whole building) count as one issue.
+- **Backlog beyond NYPD isn't measured, only estimated.** The Little's-law shares assume every month brings tickets like March. March is still heating season, so HPD's estimate in particular is rough. A real backlog figure needs an open-ticket snapshot.
+- **Times are New York wall-clock times.** Clocks jumped forward an hour at 02:00 on 8 March, so a ticket open across that jump looks an hour longer than it was. Counts at a given moment aren't affected.
 
 ## How to run
 ```bash
@@ -131,25 +172,28 @@ python scripts/repeat_reports.py             # → results/repeat_reports.md, .c
 python scripts/benchmark.py                  # ~2 min → results/benchmarks.md, .csv, chart 02
 python scripts/hot_spots.py                  # → results/hot_spots.md, .csv, chart 03
 python scripts/benchmark_topk.py             # ~40 s → results/benchmarks_topk.md, .csv, chart 04
-pytest                                       # 41 offline tests
+python scripts/backlog.py                    # ~20 s → results/backlog.md, .csv, charts 05–06
+pytest                                       # 52 offline tests
 ```
 
 ## Repo layout
 ```
 dsa/repeats.py              naive and hash-map repeat finders, building-address key (pure Python)
 dsa/topk.py                 sort vs bounded-heap top-k, overall and per group (pure Python)
+dsa/backlog.py              open backlog: naive scan, sorted lists + bisect, sweep line (pure Python)
 scripts/download_data.py    fetch March 2026 from the NYC Open Data API
 scripts/prepare.py          parse, normalise addresses, data-quality log
 scripts/repeat_reports.py   Part 1 analysis
 scripts/benchmark.py        naive vs hash map timings
 scripts/hot_spots.py        Part 2 analysis
 scripts/benchmark_topk.py   sort vs heap vs heapq.nlargest: time and peak memory
+scripts/backlog.py          Part 3 analysis
 tests/                      unit tests (hand-made cases + naive == indexed on random data)
 results/                    generated reports, CSVs and charts
 ```
 
 ## Roadmap
 - ~~**Part 2: heaps for top-k.**~~ Done: hot spots per agency, plus a time and memory benchmark against sorting and `heapq.nlargest`.
-- **Part 3: a sweep line for backlog.** Peak number of open tickets per agency over the month (the staffing question), from sorted open/close events vs checking every hour against every ticket.
+- **Part 3: a sweep line for backlog.** Analysis done: NYPD's open queue and peak, and a Little's-law check of which agencies' backlogs one month can show. Next: a benchmark of the naive per-hour scan vs `bisect` vs the sweep line.
 - **Part 4: union-find and spatial hashing.** Group reports of one incident from nearby addresses (water-main breaks, potholes on one block) and re-check DEP's water-system flags.
 - Then: final recommendations, limitations, and the finished write-up.
