@@ -25,9 +25,11 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Iterable, Sequence
+from operator import itemgetter
 
 Interval = tuple[int, "int | None"]
 Steps = list[tuple[int, int]]
+_TIME = itemgetter(0)
 
 
 def _is_ever_open(created: int, closed: int | None) -> bool:
@@ -101,14 +103,17 @@ def backlog_at(steps: Steps, times: Iterable[int]) -> list[int]:
 def peak(steps: Steps, start: int | None = None, end: int | None = None) -> tuple[int, int | None]:
     """Highest backlog in ``[start, end)`` and the first moment it's reached.
 
-    The count carried into ``start`` from before it counts too.
+    The count carried into ``start`` from before it counts too. A binary search
+    finds the first step in the window, so a short window is cheap.
     """
-    best, when = -1, None
+    best, when, i = -1, None, 0
     if start is not None:
-        best, when = backlog_at(steps, [start])[0], start
-    for t, count in steps:
-        if (start is not None and t < start) or (end is not None and t >= end):
-            continue
+        i = bisect_right(steps, start, key=_TIME)
+        best, when = (steps[i - 1][1] if i > 0 else 0), start
+    for j in range(i, len(steps)):
+        t, count = steps[j]
+        if end is not None and t >= end:
+            break
         if count > best:
             best, when = count, t
     return (best, when) if when is not None else (0, None)
@@ -118,11 +123,11 @@ def time_weighted_mean(steps: Steps, start: int, end: int) -> float:
     """Average number open over ``[start, end)``, weighting each count by how long it held."""
     if end <= start:
         raise ValueError("end must be after start")
-    area = 0
-    t_prev, count = start, backlog_at(steps, [start])[0]
-    for t, c in steps:
-        if t <= start:
-            continue
+    i = bisect_right(steps, start, key=_TIME)
+    count = steps[i - 1][1] if i > 0 else 0
+    area, t_prev = 0, start
+    for j in range(i, len(steps)):
+        t, c = steps[j]
         if t >= end:
             break
         area += count * (t - t_prev)
