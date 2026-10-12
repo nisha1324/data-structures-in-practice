@@ -21,13 +21,18 @@ from __future__ import annotations
 
 import heapq
 from collections.abc import Hashable, Iterable
+from operator import itemgetter
 
 
 def top_k_sort(items: Iterable[tuple[object, float]], k: int) -> list[tuple[object, float]]:
-    """Reference version: sort every item, keep the first k. O(n log n)."""
+    """Reference version: sort every item, keep the first k. O(n log n).
+
+    ``itemgetter`` keeps the key function in C, so the benchmark compares the
+    heap with the fastest plain sort, not one slowed down by a Python lambda.
+    """
     if k <= 0:
         return []
-    return sorted(items, key=lambda kv: kv[1], reverse=True)[:k]
+    return sorted(items, key=itemgetter(1), reverse=True)[:k]
 
 
 def top_k_heap(items: Iterable[tuple[object, float]], k: int) -> list[tuple[object, float]]:
