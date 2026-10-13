@@ -1,6 +1,6 @@
 # Data structures in practice: NYC 311 service requests
 
-> **Status: in progress.** Part 1 (hash maps for finding repeat reports), Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark) and the analysis for Part 3 (a sweep line for the open backlog) are built, tested and run on a full month of data. A Part 3 benchmark and union-find come next (see [Roadmap](#roadmap)).
+> **Status: in progress.** Part 1 (hash maps for finding repeat reports), Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark) and Part 3 (a sweep line for the open backlog, with a benchmark) are built, tested and run on a full month of data. Union-find comes next (see [Roadmap](#roadmap)).
 
 **Business question:** a city's 311 line logged **342,390 service requests in March 2026**. Agencies plan crews, inspectors and budgets from ticket counts. But how many tickets are *new problems*, and how many are people reporting a problem that's already on the list? And can an analyst answer that on a laptop in seconds instead of hours?
 
@@ -118,7 +118,7 @@ Staffing depends on how many tickets are **open at the same time**, not on how m
 | Sorted lists + binary search (`backlog_bisect`) | Sort created times and closed times once. Open at t = (created at or before t) − (closed at or before t): two `bisect` lookups | O(n log n) once, then O(log n) per moment |
 | Sweep line (`backlog_sweep`) | Sort every open (+1) and close (−1) event and walk them once with a running count | O(n log n), and it returns every moment the count changes, so the true peak can't fall between snapshots |
 
-All three return the same counts on random data in the tests, including tickets that close in the same second another opens, and tickets "closed" before they were created (never open; counting their close but not their open would make the queue negative). On the real data, the analysis script checks that the hourly counts from `bisect` match the sweep at every hour of March. A timing benchmark is next (see [Roadmap](#roadmap)).
+All three return the same counts on random data in the tests, including tickets that close in the same second another opens, and tickets "closed" before they were created (never open; counting their close but not their open would make the queue negative). On the real data, the analysis script checks that the hourly counts from `bisect` match the sweep at every hour of March. The benchmark [below](#benchmark-how-fast-and-how-often-to-look) times all three.
 
 ### First check: can one month of tickets show the backlog at all?
 The data holds tickets **created** in March. A ticket created in February and still open in March isn't in it. Every ticket's real time open is known (closing dates run up to the October download), so Little's law (backlog = arrivals × average time open) gives the share of a steady backlog that a one-month window can see. From [`results/backlog.md`](results/backlog.md):
@@ -145,6 +145,31 @@ So the peak-backlog analysis below is for NYPD only. For the others the honest a
 2. **Look at Sunday and Monday nights first.** They get fewer calls than Saturday, but their tickets stay open 27–32% longer on average, in every week of March. That's where a coverage gap is most likely, and it's cheap to check against the rota.
 3. **Measure peaks from events, not snapshots.** The hourly snapshot missed 6% of the month's worst moment. The sweep line gives the exact peak from the same data with one sort.
 4. **Don't build backlog reports from a month of new tickets.** For HPD, DOT, DOB and the others, most of the open queue is tickets over a month old. Backlog and ageing reports need an open-ticket snapshot, and the long tail of slow tickets deserves its own report, because that tail *is* the backlog.
+
+### Benchmark: how fast, and how often to look?
+From [`results/benchmarks_backlog.md`](results/benchmarks_backlog.md), on NYPD's 139,705 March tickets (2–31 March, as above). Four versions, which returned identical counts at every moment in every test: the naive scan, sorted lists + `bisect`, the sweep line (then reading the moments off its steps), and the same two ideas in numpy (`np.searchsorted`; `argsort` + `cumsum`), timed from arrays that are already built.
+
+![Backlog benchmark: time vs tickets, time vs moments, peak seen by snapshot interval](results/charts/07_benchmark_backlog.png)
+
+| Question asked | Naive | `bisect` | Sweep line | numpy |
+|---|---:|---:|---:|---:|
+| Open queue at every hour (720 moments) | 6.0 s | 57.0 ms | 357.3 ms | **6.8 ms** |
+| … every 15 minutes (2,880 moments) | 24.1 s | 59.0 ms | 359.9 ms | **7.3 ms** |
+| … at every moment the count changes (254,272: the exact peak) | ~35 min (estimated, not run) | 239.2 ms + 105.5 ms to list the moments | 474.3 ms | **28.2 ms** |
+| Exact peak straight from the steps (no read-back) | | | 334.6 ms | **21.2 ms** |
+
+| Look every | 1 hour | 15 min | 5 min | 1 min | every change |
+|---|---:|---:|---:|---:|---:|
+| Highest open queue seen | 1,173 | 1,243 | 1,245 | 1,249 | **1,251** |
+| Missed vs the exact peak | 6.2% | 0.6% | 0.5% | 0.2% | 0 |
+
+- **The naive cost is tickets × moments, and it shows.** Four times as many moments took four times as long (6.0 s → 24.1 s), so an exact answer the naive way (every moment the count changes) would take about 35 minutes. After one sort, asking about 350× more moments only took `bisect` from 57 ms to about a third of a second.
+- **For snapshots, `bisect` beats the hand-written sweep** (57 ms vs 357 ms hourly). The sweep builds and walks every open and close event in a Python loop; `bisect` sorts two lists in C and does two lookups per moment. Same lesson as Part 2: the algorithm that looks better on paper isn't faster if its loop runs in Python.
+- **The sweep's advantage is the answer, not the speed.** It returns every value the queue takes, so the true peak can't fall between snapshots. `bisect` can only match it by asking about every event time, and listing those is itself a sort of all the events.
+- **The library version wins again.** numpy was about 8× faster than `bisect` for hourly snapshots and about 16× faster than the pure-Python sweep for the exact peak (21 ms), with identical results.
+- Across two full runs on this shared VM, most timings agreed within 5% (the largest gap was 13%, on a quarter-second naive run). The peaks are exact and don't change.
+
+**What this means for the business:** a live "open tickets right now" tile doesn't need an exact event-level engine. Refreshing it every 15 minutes caught the month's worst moment to within 8 tickets (0.6%); hourly missed 78 (6.2%), and its highest reading came 27 minutes after the real peak. For a monthly staffing review that asks for the true peak, compute it from the sorted events once (21 ms with numpy for a month of NYPD tickets). Don't loop over every ticket for every moment: that's the version that turns a sub-second query into a coffee break.
 
 ## Data
 [NYC Open Data: 311 Service Requests from 2010 to Present](https://data.cityofnewyork.us/d/erm2-nwe9), published by the City of New York. Use is governed by the [NYC Open Data Terms of Use](https://opendata.cityofnewyork.us/overview/#termsofuse). `scripts/download_data.py` fetches every request **created in March 2026** (13 columns, 342,390 rows, ~20 MB gzipped) from the keyless Socrata API, in a fixed order, and checks the server's row count.
@@ -173,7 +198,8 @@ python scripts/benchmark.py                  # ~2 min → results/benchmarks.md,
 python scripts/hot_spots.py                  # → results/hot_spots.md, .csv, chart 03
 python scripts/benchmark_topk.py             # ~40 s → results/benchmarks_topk.md, .csv, chart 04
 python scripts/backlog.py                    # ~20 s → results/backlog.md, .csv, charts 05–06
-pytest                                       # 52 offline tests
+python scripts/benchmark_backlog.py          # ~80 s → results/benchmarks_backlog.md, .csv, chart 07
+pytest                                       # 55 offline tests
 ```
 
 ## Repo layout
@@ -188,12 +214,13 @@ scripts/benchmark.py        naive vs hash map timings
 scripts/hot_spots.py        Part 2 analysis
 scripts/benchmark_topk.py   sort vs heap vs heapq.nlargest: time and peak memory
 scripts/backlog.py          Part 3 analysis
+scripts/benchmark_backlog.py  naive vs bisect vs sweep vs numpy timings, peak seen by snapshot interval
 tests/                      unit tests (hand-made cases + naive == indexed on random data)
 results/                    generated reports, CSVs and charts
 ```
 
 ## Roadmap
 - ~~**Part 2: heaps for top-k.**~~ Done: hot spots per agency, plus a time and memory benchmark against sorting and `heapq.nlargest`.
-- **Part 3: a sweep line for backlog.** Analysis done: NYPD's open queue and peak, and a Little's-law check of which agencies' backlogs one month can show. Next: a benchmark of the naive per-hour scan vs `bisect` vs the sweep line.
+- ~~**Part 3: a sweep line for backlog.**~~ Done: NYPD's open queue and peak, a Little's-law check of which agencies' backlogs one month can show, and a benchmark of the naive scan vs `bisect` vs the sweep line vs numpy, with the peak each snapshot interval sees.
 - **Part 4: union-find and spatial hashing.** Group reports of one incident from nearby addresses (water-main breaks, potholes on one block) and re-check DEP's water-system flags.
 - Then: final recommendations, limitations, and the finished write-up.
