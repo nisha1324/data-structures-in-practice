@@ -1,6 +1,6 @@
 # Data structures in practice: NYC 311 service requests
 
-> **Status: in progress.** Part 1 (hash maps for finding repeat reports), Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark) and Part 3 (a sweep line for the open backlog, with a benchmark) are built, tested and run on a full month of data. Union-find comes next (see [Roadmap](#roadmap)).
+> **Status: in progress.** Part 1 (hash maps for finding repeat reports), Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark), Part 3 (a sweep line for the open backlog, with a benchmark) and the Part 4 analysis (spatial hashing + union-find for nearby reports of one incident) are built, tested and run on a full month of data. The Part 4 benchmark comes next (see [Roadmap](#roadmap)).
 
 **Business question:** a city's 311 line logged **342,390 service requests in March 2026**. Agencies plan crews, inspectors and budgets from ticket counts. But how many tickets are *new problems*, and how many are people reporting a problem that's already on the list? And can an analyst answer that on a laptop in seconds instead of hours?
 
@@ -171,6 +171,51 @@ From [`results/benchmarks_backlog.md`](results/benchmarks_backlog.md), on NYPD's
 
 **What this means for the business:** a live "open tickets right now" tile doesn't need an exact event-level engine. Refreshing it every 15 minutes caught the month's worst moment to within 8 tickets (0.6%); hourly missed 78 (6.2%), and its highest reading came 27 minutes after the real peak. For a monthly staffing review that asks for the true peak, compute it from the sorted events once (21 ms with numpy for a month of NYPD tickets). Don't loop over every ticket for every moment: that's the version that turns a sub-second query into a coffee break.
 
+## Part 4: one incident, many reports (spatial hashing + union-find)
+
+Part 1's exact-address rule found only 22.7% of DEP's water-system duplicate flags and almost none of DOT's. A water-main break or a pothole isn't at a building: it's reported from several nearby addresses, from a spot with no address at all, or by street name only. Part 4 uses the ticket **coordinates** instead.
+
+### The rule
+Two tickets are **linked** when they have the same agency and complaint type, are **within a radius** of each other, and the earlier one was still open when the later one came in (Part 1's "open" rule). A linked ticket is a repeat. Linked tickets are then joined into **incidents**.
+
+The radius is a policy choice, so it's reported for 10 m to 800 m. The working radius is **100 m for water** (water spreads: a main break or a running hydrant is seen from along the block) and **25 m for potholes** (a pothole is a point, and two potholes on one block are two repairs). The checks cover the two types where the agency marks duplicates and the problem is a place rather than a building: DEP water system, and DOT potholes (DOT only marks potholes, so its other street-condition types would all count as misses).
+
+### The data structures
+| Step | Version | How it works | Cost |
+|---|---|---|---|
+| Find nearby open tickets | Naive (`links_naive`) | For each ticket, measure the distance to every earlier ticket | O(n²) |
+| | Spatial hash (`links_grid`) | A `dict` from (type, grid cell) → earlier tickets in that cell, with cells as wide as the radius. Anything within the radius is in the same cell or one of the 8 around it, so each ticket checks 9 short lists. A ticket that's closed before the current one arrived is closed for every later one too, so it's dropped from its cell for good | O(n × open tickets nearby) |
+| Group linked tickets into incidents | Adjacency list + BFS (`incidents_bfs`) | Build the whole link graph, then walk each connected piece | O(n + links), needs all links first |
+| | Union-find (`incidents`) | Each ticket points towards a representative. Joining two groups re-points one root (the smaller tree goes under the larger, and lookups shorten the paths they walk) | near O(1) per link, works as links arrive |
+
+Union-find is needed because links chain: A can be near B and B near C while A is far from C (reports along a flooded street). The tests check that the grid returns exactly the naive version's links (random data, points on cell edges and diagonals) and that union-find returns exactly BFS's groups. A timing benchmark comes next.
+
+### Findings
+From [`results/incidents.md`](results/incidents.md):
+
+![Radius vs agreement with the agencies' duplicate flags, and width of the widest incident](results/charts/08_incident_radius.png)
+
+| Agency flags found (recall) · share of the rule's repeats the agency also flagged (precision) | Exact address (Part 1) | 10 m | Working radius | + 24-hour grace |
+|---|---:|---:|---:|---:|
+| DEP water system (98.4% of tickets mapped; working radius 100 m) | 23.3% · 85.8% | 43.6% · 84.7% | **66.8% · 75.4%** | 76.5% · 73.3% |
+| DOT potholes (41.9% of tickets mapped; working radius 25 m) | 0.1% · 7.1% | 75.5% · 87.3% | **75.6% · 86.2%** | 78.4% · 83.6% |
+
+Recall and precision are measured on mapped tickets, against the agency's own flags (a reference, not ground truth).
+
+- **Location finds what the address can't.** Even a 10 m radius nearly doubles the share of DEP's water duplicates found (43.6% vs 23.3%) with almost the same precision: 881 mapped water tickets have no street address, and Part 1 could never match them. At 100 m the rule finds two in three of DEP's flags, at 75.4% precision. For potholes the exact-address rule found 0.1%; 25 m finds 75.6% at 86.2% precision.
+- **DEP treats a report soon after closing as a duplicate.** Of the 727 flags the 100 m rule misses, 213 came in less than 24 hours after a nearby ticket was closed. Letting a ticket stay linkable for 24 hours after closing finds 76.5% of the flags, for 2.1 points of precision.
+- **Potholes need a tight radius.** Most pothole repeats are at the very same point: the five largest pothole incidents have 22–41 reports each, four of them on exactly one coordinate. Past 50 m precision drops quickly (70.8% at 100 m, 59.9% at 200 m), because nearby potholes are separate repairs. Even at 25 m, DOT says it "inspected this complaint and repaired the problem" for 330 of the 475 repeats it didn't flag, so some of those are second potholes at the same point.
+- **58% of pothole tickets can't be placed on a map.** 13,313 of 22,790 have no coordinates, and 13,189 of those give only a street name (Northern Boulevard 220 times, Broadway 200). 5,870 of DOT's 9,786 pothole flags are on these tickets, so no location rule can check them.
+- **Incidents, not tickets.** At the working radius, DEP's 5,378 mapped water tickets are **3,422 incidents** (36.4% fewer), and DOT's 9,554 mapped potholes are 6,117 (36.0% fewer). About half of each agency's tickets (49.0% and 52.2%) belong to an incident with 2 or more reports. The largest water incident had 52 reports over 9 days in Brooklyn (ZIP 11207), mostly "hydrant running full", and DEP flagged 50 of them. The largest pothole incident had 41 reports at one point in Manhattan (ZIP 10023) over 19 days.
+- **Unflagged water repeats include wasted visits.** Of the 476 water repeats DEP didn't flag, 138 were closed as "inspected your complaint but could not find the problem" and 207 as "a temporary condition". Some are separate problems, so this is a list to review, not a measured saving.
+- **Big radii chain everything together.** Union-find does exactly what it's told: A near B near C is one incident. Up to 50 m the widest incident is under 100 m across. At 400 m one pothole "incident" holds 1,162 tickets over 13.2 km, and at 800 m one water "incident" holds 2,958 tickets over 34.5 km, most of the way across the city. Single linkage only works with a small radius (or with a cap on an incident's width).
+
+**What this means for the business:**
+1. **Link water reports by location at intake.** Checking for an open ticket within 100 m catches two in three of the reports DEP itself calls duplicates, vs one in four by exact address. A dispatcher can attach the new report to the open job instead of sending another crew.
+2. **Keep a closed incident linkable for a day.** DEP already treats reports in the 24 hours after closing as duplicates. Making that the rule adds about 10 points of recall for 2 points of precision.
+3. **Capture a location for every pothole report.** 58% have none, which blocks any location-based dedupe, map or hot-spot report. A cross street or a map pin at intake would fix it.
+4. **Use a small radius, set per problem type, and report incidents next to tickets.** More than a third of mapped water and pothole tickets in March (36%) were extra reports of an incident already logged. A radius that's too big quietly merges a whole borough into one "incident", so check the width of the largest incidents whenever the radius changes.
+
 ## Data
 [NYC Open Data: 311 Service Requests from 2010 to Present](https://data.cityofnewyork.us/d/erm2-nwe9), published by the City of New York. Use is governed by the [NYC Open Data Terms of Use](https://opendata.cityofnewyork.us/overview/#termsofuse). `scripts/download_data.py` fetches every request **created in March 2026** (13 columns, 342,390 rows, ~20 MB gzipped) from the keyless Socrata API, in a fixed order, and checks the server's row count.
 
@@ -179,7 +224,7 @@ The dataset is live: agencies keep closing tickets and editing resolution text. 
 Data-quality checks are in [`results/prep_log.md`](results/prep_log.md): `unique_key` is unique; 3.3% of tickets were still open at download; 3.3% were closed in the same second they were created; 28 were "closed" before they were created (kept, never treated as open); 6.7% have no address and 8.7% give only a street name.
 
 ## Limitations (so far)
-- **Exact building-address match only.** "1 MAIN ST" and "1 MAIN STREET" don't match, nearby addresses (water-main breaks) don't link, and street-name-only tickets (most of DOT's) aren't checked at all. Part 4 adds location-based matching.
+- **Parts 1–3 match on exact building addresses.** "1 MAIN ST" and "1 MAIN STREET" don't match. Part 4 adds location-based matching for water and potholes, but only for tickets with coordinates (41.9% of pothole tickets), and tickets are compared within one complaint type, so a water report filed as a sewer complaint isn't linked.
 - **One month.** Issues first reported in late February aren't in the data, so repeats in early March are slightly undercounted.
 - **The agency flag is a reference, not ground truth.** Agencies use it for some complaint types only, and their rules aren't published.
 - **Tickets, not people.** The data has no caller ID, so one persistent caller and many neighbours look the same. A hot spot is a place that generates work, not proof of a widespread problem.
@@ -199,7 +244,8 @@ python scripts/hot_spots.py                  # → results/hot_spots.md, .csv, c
 python scripts/benchmark_topk.py             # ~40 s → results/benchmarks_topk.md, .csv, chart 04
 python scripts/backlog.py                    # ~20 s → results/backlog.md, .csv, charts 05–06
 python scripts/benchmark_backlog.py          # ~80 s → results/benchmarks_backlog.md, .csv, chart 07
-pytest                                       # 55 offline tests
+python scripts/incidents.py                  # ~10 s → results/incidents.md, incidents_sweep.csv, chart 08
+pytest                                       # 88 offline tests
 ```
 
 ## Repo layout
@@ -207,6 +253,7 @@ pytest                                       # 55 offline tests
 dsa/repeats.py              naive and hash-map repeat finders, building-address key (pure Python)
 dsa/topk.py                 sort vs bounded-heap top-k, overall and per group (pure Python)
 dsa/backlog.py              open backlog: naive scan, sorted lists + bisect, sweep line (pure Python)
+dsa/incidents.py            nearby links: naive vs spatial hash; incidents: union-find vs BFS (pure Python)
 scripts/download_data.py    fetch March 2026 from the NYC Open Data API
 scripts/prepare.py          parse, normalise addresses, data-quality log
 scripts/repeat_reports.py   Part 1 analysis
@@ -215,6 +262,7 @@ scripts/hot_spots.py        Part 2 analysis
 scripts/benchmark_topk.py   sort vs heap vs heapq.nlargest: time and peak memory
 scripts/backlog.py          Part 3 analysis
 scripts/benchmark_backlog.py  naive vs bisect vs sweep vs numpy timings, peak seen by snapshot interval
+scripts/incidents.py        Part 4 analysis
 tests/                      unit tests (hand-made cases + naive == indexed on random data)
 results/                    generated reports, CSVs and charts
 ```
@@ -222,5 +270,5 @@ results/                    generated reports, CSVs and charts
 ## Roadmap
 - ~~**Part 2: heaps for top-k.**~~ Done: hot spots per agency, plus a time and memory benchmark against sorting and `heapq.nlargest`.
 - ~~**Part 3: a sweep line for backlog.**~~ Done: NYPD's open queue and peak, a Little's-law check of which agencies' backlogs one month can show, and a benchmark of the naive scan vs `bisect` vs the sweep line vs numpy, with the peak each snapshot interval sees.
-- **Part 4: union-find and spatial hashing.** Group reports of one incident from nearby addresses (water-main breaks, potholes on one block) and re-check DEP's water-system flags.
+- **Part 4: union-find and spatial hashing.** Analysis done: DEP water and DOT pothole incidents, a radius sweep checked against the agencies' duplicate flags. Next: a benchmark of the naive vs grid link finder and union-find vs BFS.
 - Then: final recommendations, limitations, and the finished write-up.
