@@ -27,6 +27,8 @@ groups with a **union-find** (disjoint-set) structure, which merges groups in
 near-constant time per link and never has to re-label anything.
 ``incidents_bfs`` is the textbook alternative (build an adjacency list, walk
 each connected component) used as the reference in the tests.
+``incident_counts`` uses the fact that union-find works as links arrive: one
+pass gives the number of incidents so far at any list of cut-off points.
 """
 from __future__ import annotations
 
@@ -151,6 +153,28 @@ def incidents(n: int, links: Iterable[Link]) -> list[int]:
     for a, b in links:
         uf.union(a, b)
     return _first_index_labels([uf.find(i) for i in range(n)])
+
+
+def incident_counts(links: Sequence[Link], sizes: Sequence[int]) -> list[int]:
+    """Incidents among the first m tickets, for each m in ``sizes`` (ascending).
+
+    Union-find works as links arrive: every successful union merges two
+    incidents into one, so after the first m tickets there are m − merges so far.
+    One pass answers every m (e.g. "incidents so far" at the end of each day).
+    ``links`` must be ordered by the later ticket, as ``links_grid`` returns them.
+    """
+    if any(b < a for a, b in zip(sizes, sizes[1:])):
+        raise ValueError("sizes must be ascending")
+    uf = UnionFind(sizes[-1] if sizes else 0)
+    out, merges, k = [], 0, 0
+    for m in sizes:
+        while k < len(links) and links[k][1] < m:
+            if k and links[k][1] < links[k - 1][1]:
+                raise ValueError("links must be ordered by the later ticket")
+            merges += uf.union(*links[k])
+            k += 1
+        out.append(m - merges)
+    return out
 
 
 def incidents_bfs(n: int, links: Iterable[Link]) -> list[int]:

@@ -3,8 +3,8 @@ import random
 
 import pytest
 
-from dsa.incidents import (UnionFind, incidents, incidents_bfs, links_grid, links_naive,
-                           project, repeats_from_links)
+from dsa.incidents import (UnionFind, incident_counts, incidents, incidents_bfs, links_grid,
+                           links_naive, project, repeats_from_links)
 
 H = 3600
 
@@ -92,3 +92,30 @@ def test_union_find_matches_bfs_on_random_graphs(seed):
     n = 500
     links = [tuple(sorted(rng.sample(range(n), 2))) for _ in range(rng.randint(100, 700))]
     assert incidents(n, links) == incidents_bfs(n, links)
+
+
+def test_incident_counts_hand_made():
+    links = [(0, 1), (1, 2), (3, 4)]
+    # first 0, 1, 2, 3, 5, 6 tickets: incidents so far
+    assert incident_counts(links, [0, 1, 2, 3, 5, 6]) == [0, 1, 1, 1, 2, 3]
+    assert incident_counts([], []) == []
+
+
+def test_incident_counts_rejects_bad_order():
+    with pytest.raises(ValueError):
+        incident_counts([(0, 1)], [3, 2])
+    with pytest.raises(ValueError):
+        incident_counts([(0, 2), (0, 1)], [3])
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_incident_counts_match_bfs_on_every_prefix(seed):
+    rng = random.Random(seed)
+    tickets, t = [], 0
+    for _ in range(300):
+        t += rng.randint(0, 900)
+        tickets.append(("W", rng.uniform(-400, 400), rng.uniform(-400, 400), t, t + rng.choice([600, 3 * H])))
+    links = links_grid(tickets, 80)
+    sizes = sorted(rng.sample(range(301), 20))
+    expected = [len(set(incidents_bfs(m, [lk for lk in links if lk[1] < m]))) for m in sizes]
+    assert incident_counts(links, sizes) == expected
