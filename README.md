@@ -1,10 +1,17 @@
 # Data structures in practice: NYC 311 service requests
 
-> **Status: in progress.** Part 1 (hash maps for finding repeat reports), Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark), Part 3 (a sweep line for the open backlog, with a benchmark) and Part 4 (spatial hashing + union-find for nearby reports of one incident, with a benchmark) are built, tested and run on a full month of data. The final write-up comes next (see [Roadmap](#roadmap)).
+> **Status: complete.** Four parts (hash maps, heaps, a sweep line, spatial hashing + union-find), each built, tested (109 offline tests), benchmarked and run on a full month of NYC 311 data. [Recommendations](#recommendations) and [limitations](#limitations) are at the end.
 
 **Business question:** a city's 311 line logged **342,390 service requests in March 2026**. Agencies plan crews, inspectors and budgets from ticket counts. But how many tickets are *new problems*, and how many are people reporting a problem that's already on the list? And can an analyst answer that on a laptop in seconds instead of hours?
 
 This repo applies everyday data structures (the ones behind Python's `dict`, `heapq` and `bisect`) to real operational data. Each part pairs a **naive version** with a **better data structure**, checks that both give the same answer, times them, and then uses the fast one to answer a business question.
+
+## TL;DR
+- **One ticket in six is a repeat.** 57,948 of 342,390 tickets (16.9%) came in while an earlier ticket for the same thing at the same building was still open, and so did 53.2% of HPD's heat/hot-water tickets. A hash-map check finds 97.5% of HPD's own heat duplicate flags and covers the month in 0.23 s, against about 1.4 hours for the naive scan.
+- **Repeats come from a few places.** 1% of NYPD's addresses produced 56.4% of its repeats; one Bronx building alone produced 10.1%. 113 buildings had repeats for 3 or more agencies, each agency seeing only its own part.
+- **NYPD's open queue peaks at midnight, two hours after the calls do,** and Sunday and Monday night tickets stayed open 27–32% longer than Saturday's on average (every Sunday and Monday night in March was slower than every Tuesday-to-Saturday night). An hourly snapshot understated the month's peak by 6.2%; a 15-minute one by 0.6%.
+- **Location finds what the address can't.** Linking tickets within 100 m finds 66.8% of DEP's water duplicate flags (exact address: 23.3%), and 25 m finds 75.6% of DOT's pothole flags (0.1%). Mapped water and pothole tickets are about 36% fewer incidents than tickets. But 58% of pothole tickets have no coordinates at all.
+- **Engineering lesson:** the right data structure turns hours into seconds. Among the fast versions, library code (`heapq.nlargest`, numpy, scipy) beat hand-written Python every time the whole dataset was in memory. The hand-written heap and union-find earned their place on streams and running counts: about 6 kB instead of 108 MB, and 601 ms instead of about 1.1 hours.
 
 ## Part 1: repeat reports with a hash map
 
@@ -37,8 +44,8 @@ Three agencies (DOT, HPD, DEP) write "duplicate" in the resolution text for some
 |---|---:|---:|---|
 | HPD · Heat/hot water | 8,126 | **97.5%** | the rule matches HPD's own process almost exactly |
 | HPD · Plumbing | 363 | 95.0% | |
-| DEP · Water system | 2,247 | 22.7% | one water-main break is reported from many nearby addresses, so an exact-address rule misses most of them (Part 4 will use location) |
-| DOT · Street condition (potholes etc.) | 9,787 | 0.1% | can't be checked by address: only 32 of DOT's flags are on tickets with a building address. DOT records road problems by street name or not at all (Part 4 will use location) |
+| DEP · Water system | 2,247 | 22.7% | one water-main break is reported from many nearby addresses, so an exact-address rule misses most of them ([Part 4](#part-4-one-incident-many-reports-spatial-hashing--union-find) matches by location: 66.8% at 100 m, on mapped tickets) |
+| DOT · Street condition (potholes etc.) | 9,787 | 0.1% | can't be checked by address: only 32 of DOT's flags are on tickets with a building address. DOT records road problems by street name or not at all ([Part 4](#part-4-one-incident-many-reports-spatial-hashing--union-find) matches potholes by location: 75.6% at 25 m, on mapped tickets) |
 
 Precision is lower (HPD heat: 50.0% of the rule's repeats carry HPD's flag) because the rule finds repeats the agency **didn't** mark. For HPD heat that's 7,927 tickets, and the most common resolution texts show they were worked as separate jobs: 3,040 say HPD "conducted or attempted to conduct" an inspection, 1,381 that it contacted a tenant, 861 that it phoned the number on file. Some will be genuinely separate problems (a different apartment in the same building), so this is an upper bound on avoidable work, not a measured saving.
 
@@ -239,21 +246,50 @@ From [`results/benchmarks_incidents.md`](results/benchmarks_incidents.md). This 
 
 **What this means for the business:** a "is there already an open ticket for this nearby?" check at intake is cheap with the right index: about 12 µs per report with a pure-Python grid, against hours for the naive scan over a month. Use a grid (or a database's spatial index) for the live check, because it takes new reports one at a time. A KD-tree is the faster tool for re-running a whole month in a batch, for example when testing a new radius. For a live "open incidents" count on a dashboard, keep a union-find next to the queue and update it as reports come in, instead of recomputing the groups on every refresh.
 
+## Which data structure, when?
+One table across the four parts. Every row compares versions that returned identical answers.
+
+| Task | Naive | Data structure (pure Python) | Library call | Use in practice |
+|---|---|---|---|---|
+| Is there an open ticket for this already? (Part 1) | 62 s for 32,000 tickets; ~1.4 h for the month (est.) | `dict`: 0.23 s for the month | | A hash lookup (or a database index) at intake |
+| Top 10 of 135,720 counts (Part 2) | | Bounded heap: 16.6 ms, same as `sorted()` (16.3 ms) | **`heapq.nlargest`: 6.4 ms** | The library call in memory; a heap for streams (6 kB vs 108 MB for a million items) |
+| Exact peak of the open queue (Part 3) | ~35 min (est.) | Sweep line: 335 ms | **numpy: 21 ms** | numpy on sorted events for reviews; a 15-minute snapshot for a live tile |
+| Nearby open tickets, whole month (Part 4) | ~2.9 h (est.) | Spatial hash: 4.0 s, one ticket at a time | **`cKDTree`: 568 ms**, batch only | The grid (or a spatial index) live; a KD-tree for batch re-runs |
+| Group links into incidents (Part 4) | BFS: 982 ms | Union-find: 534 ms | **scipy: 49 ms** once | scipy once; union-find for a count kept up to date (601 ms vs ~1.1 h rebuilding) |
+
+**So what:** the big win is always against the naive version (hours → seconds), and it comes from choosing the right structure, not from clever code. Once the fast structure is chosen, use the library's version. Write your own only when the job is a stream or a running count that a library call would have to rebuild from scratch.
+
+## Recommendations
+Ranked by how much work or reporting error they address. Each is tied to a figure measured above. The owners are roles, not named teams: the data has no organisation chart.
+
+| # | Recommendation | Why (measured) | Owner |
+|---|---|---|---|
+| 1 | **Check for an open ticket at intake, and attach repeats to it.** Exact building address for HPD and NYPD complaint types; open tickets within 100 m for water, kept linkable for 24 hours after closing. | 16.9% of all tickets and 53.2% of HPD heat tickets are repeats. The address rule finds 97.5% of HPD's heat flags; for water, 100 m finds 66.8% of DEP's flags (76.5% with the 24-hour grace) vs 23.3% by address. The check costs about 12 µs per report with a grid. | 311 intake / CRM product owner |
+| 2 | **Report distinct issues and incidents next to ticket counts** in every volume, staffing and performance dashboard. | March had 342,390 tickets but 284,442 distinct issues by address, and mapped water and pothole tickets were 36% fewer incidents than tickets. Raw counts treat every repeat as new demand. | Performance reporting / BI lead |
+| 3 | **Manage the top 1% of repeat addresses as cases, and share a cross-agency list of buildings.** | 585 NYPD addresses (1%) drove 56.4% of its repeats; 113 buildings had repeats for 3+ agencies, such as one Bronx building with garbage, trash, boiler and rat complaints across four queues. | Agency operations leads (NYPD first); a cross-agency coordinator |
+| 4 | **Plan NYPD night cover from the open queue, and check Sunday and Monday nights against the rota first.** | Calls peak at 22:00, the open queue at 00:00 (613 open vs 306 at 06:00). Sunday and Monday night tickets stayed open 27–32% longer than Saturday's on average, in every week of March, with fewer calls. | NYPD shift planning |
+| 5 | **Capture a location for every pothole report** (a map pin or a cross street at intake). | 13,313 of 22,790 pothole tickets (58%) have no coordinates, and they carry 5,870 of DOT's 9,786 duplicate flags. Where a location exists, 25 m finds 75.6% of the flags at 86.2% precision. | 311 app / DOT intake |
+| 6 | **Build backlog reports from an open-ticket snapshot, not a month of new tickets;** refresh a live "open now" tile every 15 minutes and compute the true peak from sorted events. | One month of new tickets can show at most 45.3% of HPD's open backlog (DOT 44.0%, DPR 23.0%). An hourly view missed 6.2% of NYPD's peak; 15 minutes missed 0.6%; the exact peak takes 21 ms. | BI / reporting team |
+| 7 | **Keep dedupe radii small and set per problem type, and check the widest incident whenever a radius changes.** | Pothole precision falls from 86.2% at 25 m to 70.8% at 100 m. At 800 m, single linkage chained 2,958 water tickets over 34.5 km into one "incident". | Data / analytics engineering |
+
 ## Data
-[NYC Open Data: 311 Service Requests from 2010 to Present](https://data.cityofnewyork.us/d/erm2-nwe9), published by the City of New York. Use is governed by the [NYC Open Data Terms of Use](https://opendata.cityofnewyork.us/overview/#termsofuse). `scripts/download_data.py` fetches every request **created in March 2026** (13 columns, 342,390 rows, ~20 MB gzipped) from the keyless Socrata API, in a fixed order, and checks the server's row count.
+[NYC Open Data: 311 Service Requests from 2010 to Present](https://data.cityofnewyork.us/d/erm2-nwe9), published by the City of New York. Use is governed by the [NYC.gov Terms of Use](https://www.nyc.gov/main/terms-of-use), which the NYC Open Data site links to. `scripts/download_data.py` fetches every request **created in March 2026** (13 columns, 342,390 rows, ~20 MB gzipped) from the keyless Socrata API, in a fixed order, and checks the server's row count.
 
 The dataset is live: agencies keep closing tickets and editing resolution text. The results here use the snapshot downloaded on **2026-10-11** (SHA-256 `6ae13839c0c9f1ce…`, pinned in `data/raw/source.json`). A fresh download will differ slightly. Raw and processed files aren't committed.
 
 Data-quality checks are in [`results/prep_log.md`](results/prep_log.md): `unique_key` is unique; 3.3% of tickets were still open at download; 3.3% were closed in the same second they were created; 28 were "closed" before they were created (kept, never treated as open); 6.7% have no address and 8.7% give only a street name.
 
-## Limitations (so far)
-- **Parts 1–3 match on exact building addresses.** "1 MAIN ST" and "1 MAIN STREET" don't match. Part 4 adds location-based matching for water and potholes, but only for tickets with coordinates (41.9% of pothole tickets), and tickets are compared within one complaint type, so a water report filed as a sewer complaint isn't linked.
+## Limitations
+- **Parts 1–2 match on exact building addresses.** "1 MAIN ST" and "1 MAIN STREET" don't match. Part 4 adds location-based matching for water and potholes, but only for tickets with coordinates (41.9% of pothole tickets), and tickets are compared within one complaint type, so a water report filed as a sewer complaint isn't linked.
 - **One month.** Issues first reported in late February aren't in the data, so repeats in early March are slightly undercounted.
 - **The agency flag is a reference, not ground truth.** Agencies use it for some complaint types only, and their rules aren't published.
 - **Tickets, not people.** The data has no caller ID, so one persistent caller and many neighbours look the same. A hot spot is a place that generates work, not proof of a widespread problem.
 - **Descriptor isn't in the key.** Two different heat problems at one address (apartment vs whole building) count as one issue.
 - **Backlog beyond NYPD isn't measured, only estimated.** The Little's-law shares assume every month brings tickets like March. March is still heating season, so HPD's estimate in particular is rough. A real backlog figure needs an open-ticket snapshot.
 - **Times are New York wall-clock times.** Clocks jumped forward an hour at 02:00 on 8 March, so a ticket open across that jump looks an hour longer than it was. Counts at a given moment aren't affected.
+- **The Part 4 radii were chosen on the same month they're scored on.** 100 m and 25 m were picked from the radius sweep against March's agency flags, with no held-out month, so the recall and precision at those radii are a little optimistic. Single linkage also chains incidents at large radii (see Part 4).
+- **Benchmarks are from a shared VM, one Python version (3.12) and one machine.** Timings vary between runs (each benchmark section above gives its spread), but the answers were identical every time. The ratios between versions matter more than the absolute times, and the pure-Python vs C gaps would shift with another interpreter. Estimates for runs that would take hours are extrapolated, not measured.
+- **The data is a live snapshot.** Agencies keep closing tickets and editing resolution text, so a fresh download gives slightly different figures (see [Data](#data)).
 
 ## How to run
 ```bash
@@ -293,7 +329,11 @@ results/                    generated reports, CSVs and charts
 ```
 
 ## Roadmap
-- ~~**Part 2: heaps for top-k.**~~ Done: hot spots per agency, plus a time and memory benchmark against sorting and `heapq.nlargest`.
-- ~~**Part 3: a sweep line for backlog.**~~ Done: NYPD's open queue and peak, a Little's-law check of which agencies' backlogs one month can show, and a benchmark of the naive scan vs `bisect` vs the sweep line vs numpy, with the peak each snapshot interval sees.
-- ~~**Part 4: union-find and spatial hashing.**~~ Done: DEP water and DOT pothole incidents, a radius sweep checked against the agencies' duplicate flags, and a benchmark of the naive vs grid vs KD-tree link finders and union-find vs BFS vs scipy (one-off and running counts).
-- Then: final recommendations, limitations, and the finished write-up.
+- [x] Download script with a pinned snapshot, prepare step with a data-quality log
+- [x] Part 1: hash-map repeat finder, checked against the agencies' duplicate flags, with a benchmark
+- [x] Part 2: heap top-k hot spots per agency, with a time and memory benchmark against sorting and `heapq.nlargest`
+- [x] Part 3: sweep-line open backlog (NYPD's queue and peak, a Little's-law visibility check), with a benchmark against the naive scan, `bisect` and numpy
+- [x] Part 4: spatial hashing + union-find for DEP water and DOT pothole incidents, a radius sweep, and a benchmark against naive, KD-tree and scipy versions
+- [x] TL;DR, cross-part summary, recommendations and limitations
+
+Possible extensions: rerun the backlog analysis on an open-ticket snapshot so HPD, DOT and the others can be measured; add a second month to test whether the Sunday/Monday-night pattern and the Part 4 radii hold on data they weren't chosen on; normalise street suffixes ("ST" vs "STREET") before matching; cap an incident's width so large radii can't chain across a borough.
