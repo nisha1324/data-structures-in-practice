@@ -1,6 +1,6 @@
 # Data structures in practice: NYC 311 service requests
 
-> **Status: in progress.** Part 1 (hash maps for finding repeat reports), Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark), Part 3 (a sweep line for the open backlog, with a benchmark) and the Part 4 analysis (spatial hashing + union-find for nearby reports of one incident) are built, tested and run on a full month of data. The Part 4 benchmark comes next (see [Roadmap](#roadmap)).
+> **Status: in progress.** Part 1 (hash maps for finding repeat reports), Part 2 (heaps for ranking repeat hot spots, with a time and memory benchmark), Part 3 (a sweep line for the open backlog, with a benchmark) and Part 4 (spatial hashing + union-find for nearby reports of one incident, with a benchmark) are built, tested and run on a full month of data. The final write-up comes next (see [Roadmap](#roadmap)).
 
 **Business question:** a city's 311 line logged **342,390 service requests in March 2026**. Agencies plan crews, inspectors and budgets from ticket counts. But how many tickets are *new problems*, and how many are people reporting a problem that's already on the list? And can an analyst answer that on a laptop in seconds instead of hours?
 
@@ -188,7 +188,7 @@ The radius is a policy choice, so it's reported for 10 m to 800 m. The working r
 | Group linked tickets into incidents | Adjacency list + BFS (`incidents_bfs`) | Build the whole link graph, then walk each connected piece | O(n + links), needs all links first |
 | | Union-find (`incidents`) | Each ticket points towards a representative. Joining two groups re-points one root (the smaller tree goes under the larger, and lookups shorten the paths they walk) | near O(1) per link, works as links arrive |
 
-Union-find is needed because links chain: A can be near B and B near C while A is far from C (reports along a flooded street). The tests check that the grid returns exactly the naive version's links (random data, points on cell edges and diagonals) and that union-find returns exactly BFS's groups. A timing benchmark comes next.
+Union-find is needed because links chain: A can be near B and B near C while A is far from C (reports along a flooded street). The tests check that the grid returns exactly the naive version's links (random data, points on cell edges and diagonals) and that union-find returns exactly BFS's groups. Timings are in the [benchmark](#benchmark-does-the-data-structure-matter) below.
 
 ### Findings
 From [`results/incidents.md`](results/incidents.md):
@@ -215,6 +215,29 @@ Recall and precision are measured on mapped tickets, against the agency's own fl
 2. **Keep a closed incident linkable for a day.** DEP already treats reports in the 24 hours after closing as duplicates. Making that the rule adds about 10 points of recall for 2 points of precision.
 3. **Capture a location for every pothole report.** 58% have none, which blocks any location-based dedupe, map or hot-spot report. A cross street or a map pin at intake would fix it.
 4. **Use a small radius, set per problem type, and report incidents next to tickets.** More than a third of mapped water and pothole tickets in March (36%) were extra reports of an incident already logged. A radius that's too big quietly merges a whole borough into one "incident", so check the width of the largest incidents whenever the radius changes.
+
+### Benchmark: does the data structure matter?
+From [`results/benchmarks_incidents.md`](results/benchmarks_incidents.md). This applies the same rule city-wide: all 324,276 March tickets that have coordinates, across 176 agency + complaint-type pairs (links only join tickets of the same type). Three ways to find links: the naive scan, the spatial hash, and scipy's `cKDTree` as the library call (one tree per type, `query_pairs` for every pair within the radius, then a numpy filter for the open rule, timed from arrays that are already built). Three ways to group them: BFS, union-find and scipy's `connected_components`. Every version returned identical links and identical incidents, or the script would have stopped.
+
+![Incident benchmark: link-finder time vs tickets and vs radius, and the cost of a running incident count](results/charts/09_benchmark_incidents.png)
+
+| Question | Naive / BFS | Spatial hash / union-find | Library (`cKDTree` / scipy) |
+|---|---:|---:|---:|
+| Find links, all 324,276 tickets, 100 m | ~2.9 h (estimated, not run) | 4.0 s | **568 ms** |
+| Find links, 800 m | | 14.1 s | **2.7 s** |
+| Group 487,465 links into incidents, once | 982 ms | 534 ms | **49 ms** |
+| "Incidents so far", asked at the end of every day (31×) | 15.5 s | 493 ms | **390 ms** (rebuilt each time) |
+| … every hour (744×) | ~6 min (est.) | **504 ms** | 9.1 s (rebuilt each time) |
+| … after every new ticket (324,276×) | ~44 h (est.) | **601 ms** | ~1.1 h (est.) |
+
+- **The spatial hash is what makes the check possible.** The naive scan compares every pair: 10.0 s for 10,000 tickets, so about 2.9 hours for the month (estimated from n(n − 1)/2 comparisons, not run). The grid does the whole month in 4.0 s, about 12 µs per ticket, and it checks each new ticket as it arrives.
+- **The KD-tree is about 7× faster again for a batch run, but it only knows about space.** At 100 m it collected 4,497,100 same-type pairs within the radius, then threw away 89% of them because the earlier ticket had already closed: 9.2× more pairs than the 487,465 links it kept. It also needs every point up front (a `cKDTree` can't add a point), so checking each new report as it arrives would mean rebuilding it. The grid just adds the ticket to its cell.
+- **A bigger radius costs time.** The grid went from 2.9 s at 10 m to 14.1 s at 800 m, because each cell holds more open tickets and there are 8.4× as many links.
+- **For one grouping, the library wins:** scipy's `connected_components` took 49 ms, union-find 534 ms and BFS 982 ms. That's the lesson of Parts 2 and 3 again.
+- **Union-find's real advantage is the running count.** Keeping "incidents so far" up to date after every new ticket took 601 ms for the whole month in one pass. Rebuilding with scipy each time would take about 1.1 hours (a linear estimate that leaves out scipy's fixed cost per call, so probably low), and with BFS about 44 hours. Asked once a day, rebuilding with scipy (390 ms) is as fast as union-find (493 ms). The right choice depends on how often the question is asked.
+- Across three full runs on this shared VM, most timings over 100 ms agreed within 5% (the largest gap was 11%). Links and incident counts were identical every time.
+
+**What this means for the business:** a "is there already an open ticket for this nearby?" check at intake is cheap with the right index: about 12 µs per report with a pure-Python grid, against hours for the naive scan over a month. Use a grid (or a database's spatial index) for the live check, because it takes new reports one at a time. A KD-tree is the faster tool for re-running a whole month in a batch, for example when testing a new radius. For a live "open incidents" count on a dashboard, keep a union-find next to the queue and update it as reports come in, instead of recomputing the groups on every refresh.
 
 ## Data
 [NYC Open Data: 311 Service Requests from 2010 to Present](https://data.cityofnewyork.us/d/erm2-nwe9), published by the City of New York. Use is governed by the [NYC Open Data Terms of Use](https://opendata.cityofnewyork.us/overview/#termsofuse). `scripts/download_data.py` fetches every request **created in March 2026** (13 columns, 342,390 rows, ~20 MB gzipped) from the keyless Socrata API, in a fixed order, and checks the server's row count.
@@ -245,7 +268,8 @@ python scripts/benchmark_topk.py             # ~40 s → results/benchmarks_topk
 python scripts/backlog.py                    # ~20 s → results/backlog.md, .csv, charts 05–06
 python scripts/benchmark_backlog.py          # ~80 s → results/benchmarks_backlog.md, .csv, chart 07
 python scripts/incidents.py                  # ~10 s → results/incidents.md, incidents_sweep.csv, chart 08
-pytest                                       # 88 offline tests
+python scripts/benchmark_incidents.py         # ~5 min → results/benchmarks_incidents.md, .csv, chart 09
+pytest                                       # 109 offline tests
 ```
 
 ## Repo layout
@@ -253,7 +277,7 @@ pytest                                       # 88 offline tests
 dsa/repeats.py              naive and hash-map repeat finders, building-address key (pure Python)
 dsa/topk.py                 sort vs bounded-heap top-k, overall and per group (pure Python)
 dsa/backlog.py              open backlog: naive scan, sorted lists + bisect, sweep line (pure Python)
-dsa/incidents.py            nearby links: naive vs spatial hash; incidents: union-find vs BFS (pure Python)
+dsa/incidents.py            nearby links: naive vs spatial hash; incidents: union-find vs BFS, running counts (pure Python)
 scripts/download_data.py    fetch March 2026 from the NYC Open Data API
 scripts/prepare.py          parse, normalise addresses, data-quality log
 scripts/repeat_reports.py   Part 1 analysis
@@ -263,6 +287,7 @@ scripts/benchmark_topk.py   sort vs heap vs heapq.nlargest: time and peak memory
 scripts/backlog.py          Part 3 analysis
 scripts/benchmark_backlog.py  naive vs bisect vs sweep vs numpy timings, peak seen by snapshot interval
 scripts/incidents.py        Part 4 analysis
+scripts/benchmark_incidents.py  naive vs grid vs KD-tree links; union-find vs BFS vs scipy; running incident counts
 tests/                      unit tests (hand-made cases + naive == indexed on random data)
 results/                    generated reports, CSVs and charts
 ```
@@ -270,5 +295,5 @@ results/                    generated reports, CSVs and charts
 ## Roadmap
 - ~~**Part 2: heaps for top-k.**~~ Done: hot spots per agency, plus a time and memory benchmark against sorting and `heapq.nlargest`.
 - ~~**Part 3: a sweep line for backlog.**~~ Done: NYPD's open queue and peak, a Little's-law check of which agencies' backlogs one month can show, and a benchmark of the naive scan vs `bisect` vs the sweep line vs numpy, with the peak each snapshot interval sees.
-- **Part 4: union-find and spatial hashing.** Analysis done: DEP water and DOT pothole incidents, a radius sweep checked against the agencies' duplicate flags. Next: a benchmark of the naive vs grid link finder and union-find vs BFS.
+- ~~**Part 4: union-find and spatial hashing.**~~ Done: DEP water and DOT pothole incidents, a radius sweep checked against the agencies' duplicate flags, and a benchmark of the naive vs grid vs KD-tree link finders and union-find vs BFS vs scipy (one-off and running counts).
 - Then: final recommendations, limitations, and the finished write-up.
